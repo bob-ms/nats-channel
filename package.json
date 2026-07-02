@@ -1,0 +1,30 @@
+{
+  "name": "nats-channel",
+  "version": "0.1.0",
+  "description": "Owned hub component: NATS channel plugin for Claude Code — bridges NATS messaging to a Claude Code session, mints/adopts the session's A2A contextId at SessionStart, and stamps it into the plane registration metadata.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "nats-channel": "bin/start"
+  },
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@nats-io/transport-node": "^3.4.0",
+    "@nats-io/services": "^3.4.0",
+    "@synadia-ai/agents": "^0.5.1",
+    "@synadia-ai/agent-service": "^0.5.2",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

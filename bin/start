@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Plugin entrypoint. Registered via .claude-plugin/plugin.json mcpServers.
+set -e
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec bun "$DIR/src/server.ts" "$@"

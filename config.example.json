@@ -1,0 +1,8 @@
+{
+  "context": "local",
+  "owner": "rob",
+  "sessionName": "hub-1",
+  "permissions": {
+    "mode": "terminal"
+  }
+}
