@@ -2,11 +2,10 @@
 // Session-event hook: publish a Claude Code session lifecycle event onto NATS,
 // so a watcher can keep an eye on the whole fleet without anyone polling.
 //
-// Moved in from the skills repo (bob-260, design-fleet-hub-session-identity.md
-// §Producer edge) — rides this plugin alongside the SessionStart minter
-// (session-start.ts) so the id source and its stamp ship as one component.
-// The skills-repo copy is the manual-cutover companion (see BOB-260's Execute
-// report): this file is DORMANT until that plugin registration flips.
+// Rides this plugin alongside the SessionStart minter (session-start.ts) so the
+// id source and its stamp ship as one component. This hook is DORMANT until the
+// plugin registration flips; until then the live emitter is the skills-repo
+// copy, which the manual cutover removes (see the component README).
 //
 // Wired in hooks.json to UserPromptSubmit, Notification, Stop, SubagentStop,
 // SessionStart and SessionEnd — each invocation passes its event name as the
