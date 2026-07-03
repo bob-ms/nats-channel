@@ -3,16 +3,17 @@
 // so a watcher can keep an eye on the whole fleet without anyone polling.
 //
 // Rides this plugin alongside the SessionStart minter (session-start.ts) so the
-// id source and its stamp ship as one component. This hook is DORMANT until the
-// plugin registration flips; until then the live emitter is the skills-repo
-// copy, which the manual cutover removes (see the component README).
+// id source and its stamp ship as one component. This is the live session-event
+// emitter of record: loaded into every session via claude-wrapper's --plugin-dir,
+// it publishes on the unified `cc` token. The old skills-repo copy (which
+// published the legacy `claude` token) has been retired — this plugin is its home.
 //
-// Wired in hooks.json to UserPromptSubmit, Notification, Stop, SubagentStop,
-// SessionStart and SessionEnd — each invocation passes its event name as the
-// first argument.
+// Wired in hooks.json to UserPromptSubmit, PostToolUse, Notification, Stop,
+// SubagentStop, SessionStart and SessionEnd — each invocation passes its event
+// name as the first argument.
 //
 //   subject:  agent.session.<runtime>.<event>.<project>   (runtime = cc here)
-//     event   = neutral lifecycle verb (start | waiting | idle | child_end | end)
+//     event   = neutral lifecycle verb (open | start | tool | waiting | idle | child_end | end)
 //     project = cwd → <org>.<repo>, worktrunk ".branch" suffix stripped, else cwd basename
 //   watch:    nats sub 'agent.session.>'
 //
