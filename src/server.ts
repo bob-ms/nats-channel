@@ -341,7 +341,7 @@ setInterval(() => {
 
 const config = loadConfig()
 // Resolution order (uniform across agents/pi, agents/openclaw, and the
-// pi-headless / claude-code-headless sibling components):
+// controllers/{pi,cc} sibling components):
 //   1. $NATS_CONTEXT env var
 //   2. config-file `context` field (set via /nats-channel:configure)
 //   3. $NATS_URL env var (raw URL; userinfo extracted via parseNatsUrl)

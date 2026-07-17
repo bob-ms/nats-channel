@@ -6,7 +6,7 @@ verb-first subjects, §7 query relay, §8.3 heartbeats) and mints/adopts the
 session's A2A `contextId` at `SessionStart`, stamping it into the plane
 registration metadata.
 
-Sibling of `claude-code-headless/` / `pi-headless/` in this hub.
+Sibling of `controllers/{pi,cc}` in this hub.
 Ours-not-vendored (like the hub root `src/`) — seeded from the old skills-repo
 roll with the synadia 0.4.0 improvements ported in; no upstream PR, never
 enters the `vendored-patches` inventory.
