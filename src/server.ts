@@ -64,7 +64,8 @@ import { homedir } from 'os'
 import { join, basename, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildServiceMetadata } from './registration'
-import { listPeers, promptPeer } from './peers'
+import { registerAgent, type RegisteredAgent } from './register'
+import { PEER_TOOL_DEFS, callPeerTool, isPeerTool } from './tools'
 
 // ── Constants ──────────────────────────────────────────────────────────
 const AGENT_ID = 'claude-code'          // metadata.agent (canonical per Appendix C)
@@ -413,74 +414,59 @@ const subject = agentSubject.prompt
 const heartbeatSubject = agentSubject.heartbeat
 const statusSubject = agentSubject.status
 
-const svcm = new Svcm(nc)
-const service = await svcm.add({
-  name: SERVICE_NAME,
+// Tools-only launch mode (BOB-416): `NATS_NO_REGISTER` skips all plane
+// registration — no `svcm.add`, no prompt/status endpoints, no heartbeat —
+// while the peer tools below stay fully wired against the live `nc`. This is
+// the entrypoint BOB-413's pi `mcp.json` points at, so a pi session driving
+// these tools does not spawn a phantom `cc` agent on the bus. Registration
+// itself lives in `register.ts`, guarded behind this one flag (not a fork).
+const NO_REGISTER = /^(1|true|yes)$/i.test(process.env.NATS_NO_REGISTER ?? '')
+
+// §8.3 heartbeat/status payload, built once the instance id is known. The lazy
+// per-session `context_id` read (keyed by `CLAUDE_CODE_SESSION_ID`, never the
+// static per-user `config.json`) happens inside `buildServiceMetadata` below.
+function buildHeartbeatBytes(id: string): Uint8Array {
+  return encodeHeartbeatPayload(
+    buildHeartbeatPayload(agentSubject, HEARTBEAT_INTERVAL_S, id, {
+      session: sessionName,
+    }),
+  )
+}
+
+const registered: RegisteredAgent | null = await registerAgent({
+  noRegister: NO_REGISTER,
+  nc,
+  serviceName: SERVICE_NAME,
   version: PLUGIN_VERSION,
   description: `Claude Code — ${sessionName}`,
-  // The lazy per-session read: `CLAUDE_CODE_SESSION_ID` is the mapping key
-  // (registration.ts). Never the static per-user `config.json` — that's
-  // read once above, at boot, for the owner/session/permissions surface
-  // only (AC #4).
   metadata: buildServiceMetadata({
     owner,
     session: sessionName,
     protocolVersion: `${SDK_PROTOCOL_VERSION.major}.${SDK_PROTOCOL_VERSION.minor}`,
     sessionId: process.env.CLAUDE_CODE_SESSION_ID,
   }),
-  queue: '',
-})
-
-service.addEndpoint('prompt', {
-  subject,
-  queue: PROMPT_QUEUE_GROUP,
-  handler: (err, msg) => handleNatsMessage(err, msg),
-  metadata: {
+  promptSubject: subject,
+  promptQueue: PROMPT_QUEUE_GROUP,
+  promptMetadata: {
     max_payload: MAX_PAYLOAD_STR,
     attachments_ok: DEFAULT_ATTACHMENTS_OK ? 'true' : 'false',
   },
+  statusSubject,
+  statusQueue: STATUS_QUEUE_GROUP,
+  heartbeatSubject,
+  heartbeatIntervalMs: HEARTBEAT_INTERVAL_S * 1000,
+  onPrompt: handleNatsMessage,
+  buildHeartbeat: buildHeartbeatBytes,
 })
 
-const instanceId = service.info().id
+// Undefined in tools-only mode; `list_agents` self-exclusion is then a no-op.
+const instanceId = registered?.instanceId
 
-// §8.7 (v0.3): status request/response endpoint replies with a freshly-built
-// §8.3 heartbeat payload. Same shape as the periodic heartbeat, different
-// transport (request/response instead of pub/sub).
-function buildHeartbeatBytes(): Uint8Array {
-  return encodeHeartbeatPayload(
-    buildHeartbeatPayload(agentSubject, HEARTBEAT_INTERVAL_S, instanceId, {
-      session: sessionName,
-    }),
-  )
+if (registered) {
+  process.stderr.write(`nats channel: micro service registered (id=${instanceId}) on ${subject}\n`)
+} else {
+  process.stderr.write(`nats channel: NATS_NO_REGISTER set — tools-only mode, no plane registration\n`)
 }
-
-service.addEndpoint('status', {
-  subject: statusSubject,
-  queue: STATUS_QUEUE_GROUP,
-  handler: (err, msg: ServiceMsg) => {
-    if (err) return
-    try {
-      msg.respond(buildHeartbeatBytes())
-    } catch (e) {
-      try {
-        msg.respondError(500, `status handler error: ${(e as Error).message}`)
-      } catch {
-        // connection may already be gone
-      }
-    }
-  },
-})
-
-process.stderr.write(`nats channel: micro service registered (id=${instanceId}) on ${subject}\n`)
-
-// ── Heartbeat loop (§8) ────────────────────────────────────────────────
-
-function publishHeartbeat(): void {
-  nc.publish(heartbeatSubject, buildHeartbeatBytes())
-}
-publishHeartbeat()
-const heartbeatTimer = setInterval(publishHeartbeat, HEARTBEAT_INTERVAL_S * 1000)
-heartbeatTimer.unref()
 
 // ── MCP server ─────────────────────────────────────────────────────────
 
@@ -494,15 +480,22 @@ const mcp = new Server(
         'claude/channel/permission': {},
       },
     },
-    instructions: [
-      `NATS channel connected to ${natsCtx.url ?? 'default'} (${ctxLabel}), listening on ${subject}.`,
-      '',
-      'The sender communicates via NATS messaging, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches them.',
-      '',
-      'Messages from NATS arrive as <channel source="nats" request_id="..." session="..." ts="...">. If the sender included files, the channel content begins with an "[Attachments available at the following absolute paths]" block listing them — you can Read those paths to inspect the files.',
-      '',
-      'Reply with the reply tool — pass request_id back. Set done=false for intermediate/streaming replies; done=true (default) signals completion to the requester.',
-    ].join('\n'),
+    instructions: (registered
+      ? [
+          `NATS channel connected to ${natsCtx.url ?? 'default'} (${ctxLabel}), listening on ${subject}.`,
+          '',
+          'The sender communicates via NATS messaging, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches them.',
+          '',
+          'Messages from NATS arrive as <channel source="nats" request_id="..." session="..." ts="...">. If the sender included files, the channel content begins with an "[Attachments available at the following absolute paths]" block listing them — you can Read those paths to inspect the files.',
+          '',
+          'Reply with the reply tool — pass request_id back. Set done=false for intermediate/streaming replies; done=true (default) signals completion to the requester.',
+        ]
+      : [
+          `NATS channel connected to ${natsCtx.url ?? 'default'} (${ctxLabel}), tools-only mode (NATS_NO_REGISTER) — not registered on the plane, not listening for inbound prompts.`,
+          '',
+          'Use list_agents and prompt_agent to see and message live fleet peers over NATS.',
+        ]
+    ).join('\n'),
   },
 )
 
@@ -622,31 +615,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['request_id', 'text'],
       },
     },
-    {
-      name: 'list_agents',
-      description:
-        "List every other live peer on the fleet (fresh control-plane lookup): runtime, owner, name, host, and role. Controllers appear with role 'controller' and are not promptable.",
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-    },
-    {
-      name: 'prompt_agent',
-      description:
-        'Prompt a named live peer and stream its reply back. Address by name; add owner and/or runtime to disambiguate. Controllers are not promptable.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'The peer name to address (5th subject token).' },
-          prompt: { type: 'string', description: 'The prompt text to send.' },
-          owner: { type: 'string', description: 'Disambiguate by owner when the bare name is ambiguous.' },
-          runtime: { type: 'string', description: 'Disambiguate by runtime: cc or pi.' },
-          timeout_ms: { type: 'number', description: 'Max wait for the reply in ms (default 120000).' },
-        },
-        required: ['name', 'prompt'],
-      },
-    },
+    ...PEER_TOOL_DEFS,
   ],
 }))
 
@@ -688,30 +657,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         await nc.flush()
         return { content: [{ type: 'text', text: 'sent' }] }
       }
-      case 'list_agents': {
-        const rows = await listPeers(nc, { excludeInstanceId: instanceId })
-        return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] }
-      }
-      case 'prompt_agent': {
-        const name = args.name as string
-        const promptText = args.prompt as string
-        const owner_ = args.owner as string | undefined
-        const runtime = args.runtime as string | undefined
-        const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined
-
-        const sender = { runtime: AGENT_SUBJECT_TOKEN, owner, name: sessionName }
-        const { text } = await promptPeer(
-          nc,
-          { name, owner: owner_, runtime },
-          promptText,
-          sender,
-          { timeoutMs },
-        )
-        return {
-          content: [{ type: 'text', text: text.length > 0 ? text : '(peer replied with no text)' }],
-        }
-      }
       default:
+        if (isPeerTool(req.params.name)) {
+          const { text } = await callPeerTool(req.params.name, args, {
+            nc,
+            instanceId,
+            sender: { runtime: AGENT_SUBJECT_TOKEN, owner, name: sessionName },
+          })
+          return { content: [{ type: 'text', text }] }
+        }
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
           isError: true,
@@ -826,12 +780,11 @@ function shutdown(): void {
   shuttingDown = true
   process.stderr.write('nats channel: shutting down\n')
 
-  clearInterval(heartbeatTimer)
+  if (registered) clearInterval(registered.heartbeatTimer)
   for (const id of Array.from(pendingRequests.keys())) deletePending(id)
 
   setTimeout(() => process.exit(0), 2000)
-  void service.stop()
-    .then(() => nc.drain())
+  void (registered ? registered.service.stop().then(() => nc.drain()) : nc.drain())
     .finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
