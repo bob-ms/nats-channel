@@ -64,6 +64,7 @@ import { homedir } from 'os'
 import { join, basename, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildServiceMetadata } from './registration'
+import { listPeers, promptPeer } from './peers'
 
 // ── Constants ──────────────────────────────────────────────────────────
 const AGENT_ID = 'claude-code'          // metadata.agent (canonical per Appendix C)
@@ -621,6 +622,31 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['request_id', 'text'],
       },
     },
+    {
+      name: 'list_agents',
+      description:
+        "List every other live peer on the fleet (fresh control-plane lookup): runtime, owner, name, host, and role. Controllers appear with role 'controller' and are not promptable.",
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'prompt_agent',
+      description:
+        'Prompt a named live peer and stream its reply back. Address by name; add owner and/or runtime to disambiguate. Controllers are not promptable.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'The peer name to address (5th subject token).' },
+          prompt: { type: 'string', description: 'The prompt text to send.' },
+          owner: { type: 'string', description: 'Disambiguate by owner when the bare name is ambiguous.' },
+          runtime: { type: 'string', description: 'Disambiguate by runtime: cc or pi.' },
+          timeout_ms: { type: 'number', description: 'Max wait for the reply in ms (default 120000).' },
+        },
+        required: ['name', 'prompt'],
+      },
+    },
   ],
 }))
 
@@ -661,6 +687,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
         await nc.flush()
         return { content: [{ type: 'text', text: 'sent' }] }
+      }
+      case 'list_agents': {
+        const rows = await listPeers(nc, { excludeInstanceId: instanceId })
+        return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] }
+      }
+      case 'prompt_agent': {
+        const name = args.name as string
+        const promptText = args.prompt as string
+        const owner_ = args.owner as string | undefined
+        const runtime = args.runtime as string | undefined
+        const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined
+
+        const sender = { runtime: AGENT_SUBJECT_TOKEN, owner, name: sessionName }
+        const { text } = await promptPeer(
+          nc,
+          { name, owner: owner_, runtime },
+          promptText,
+          sender,
+          { timeoutMs },
+        )
+        return {
+          content: [{ type: 'text', text: text.length > 0 ? text : '(peer replied with no text)' }],
+        }
       }
       default:
         return {
