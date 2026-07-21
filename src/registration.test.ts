@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeMapping } from "./identity";
-import { buildServiceMetadata } from "./registration";
+import { buildServiceMetadata, fleetHost } from "./registration";
 
 let mappingDir: string;
 
@@ -75,5 +75,48 @@ describe("buildServiceMetadata — inner cases", () => {
     });
 
     expect("context_id" in metadata).toBe(false);
+  });
+});
+
+describe("buildServiceMetadata — host field (BOB-409)", () => {
+  test("carries the fleet host the registry surfaces per peer", () => {
+    const metadata = buildServiceMetadata({
+      owner: "rob",
+      session: "hub-1",
+      protocolVersion: "0.3",
+      host: "vert",
+    });
+
+    expect(metadata.host).toBe("vert");
+  });
+
+  test("derives host from the environment when none is passed", () => {
+    const metadata = buildServiceMetadata({
+      owner: "rob",
+      session: "hub-1",
+      protocolVersion: "0.3",
+    });
+
+    expect(metadata.host).toBe(fleetHost());
+    expect(metadata.host.length).toBeGreaterThan(0);
+  });
+});
+
+describe("fleetHost — short fleet host derivation (BOB-409)", () => {
+  const saved = process.env.BOBMS_HOST;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.BOBMS_HOST;
+    else process.env.BOBMS_HOST = saved;
+  });
+
+  test("BOBMS_HOST overrides the OS hostname", () => {
+    process.env.BOBMS_HOST = "blue";
+    expect(fleetHost()).toBe("blue");
+  });
+
+  test("falls back to the OS hostname's first label", () => {
+    delete process.env.BOBMS_HOST;
+    expect(fleetHost()).not.toContain(".");
+    expect(fleetHost().length).toBeGreaterThan(0);
   });
 });
