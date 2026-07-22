@@ -388,7 +388,7 @@ const rawSessionName = (process.env.SYNADIA_CLAUDE_CODE_NAME
   ?? process.env.SYNADIA_NAME
   ?? process.env.NATS_SESSION_NAME
   ?? config.sessionName
-  ?? sanitizeSessionName(basename(process.env.CLAUDE_CWD ?? '')))
+  ?? sanitizeSessionName(basename(process.env.CLAUDE_CWD ?? process.env.PWD ?? '')))
   || 'default'
 
 const sessionName = await resolveSessionName(nc, rawSessionName, owner)
