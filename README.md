@@ -39,9 +39,9 @@ Design-of-record: `proposed/bob-ms/skills/design-fleet-hub-session-identity.md`.
   registration time — **not** from the static per-user `config.json`
   (`~/.claude/channels/nats/config.json`, see `config.example.json`), which
   is read once at boot and is structurally the wrong place for a per-session
-  fact. Roster-fold copies the service `metadata` verbatim onto the
-  `cc_sessions` row, so `context_id` surfaces as `metadata.context_id` with
-  zero roster-fold change.
+  fact. Roster consumers copy the service `metadata` verbatim onto their
+  roster row, so `context_id` surfaces as `metadata.context_id` with
+  zero consumer change.
 
 ## Ops riders (manual, out of this slice)
 

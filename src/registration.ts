@@ -1,8 +1,7 @@
 // Plane registration metadata — the seam that stamps `context_id` onto the
-// service `metadata` block `server.ts` hands to `svcm.add`. `roster-fold.ts`
-// (root `src/roster-fold.ts`) copies `metadata` verbatim onto the `cc_sessions`
-// roster row, so adding `context_id` here surfaces it as `metadata.context_id`
-// with zero roster-fold change.
+// service `metadata` block `server.ts` hands to `svcm.add`. Roster consumers
+// copy `metadata` verbatim, so adding `context_id` here surfaces it as
+// `metadata.context_id` with zero consumer change.
 //
 // The read is lazy and per-session (keyed by `CLAUDE_CODE_SESSION_ID`) — it
 // never touches the static per-user `config.json`, which is read once at
@@ -43,7 +42,7 @@ export type BuildServiceMetadataInput = {
 export function fleetHost(): string {
   const override = process.env.BOBMS_HOST;
   if (override && override.length > 0) return override;
-  return hostname().split(".")[0];
+  return hostname().split(".")[0] ?? hostname();
 }
 
 export function buildServiceMetadata(input: BuildServiceMetadataInput): ServiceMetadata {

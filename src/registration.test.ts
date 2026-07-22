@@ -2,7 +2,7 @@
 // registration metadata built for that session carries `context_id`, read
 // lazily and keyed by CLAUDE_CODE_SESSION_ID — never from the static
 // per-user config.json (this module never touches it). This first test is
-// the contract; the roster-fold consumes `metadata` verbatim, so its shape
+// the contract; roster consumers read `metadata` verbatim, so its shape
 // here is what ends up on the roster row.
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
@@ -39,7 +39,7 @@ describe("buildServiceMetadata — end-to-end contract", () => {
 });
 
 describe("buildServiceMetadata — inner cases", () => {
-  test("carries the base fields the roster-fold copies verbatim", () => {
+  test("carries the base fields roster consumers copy verbatim", () => {
     const metadata = buildServiceMetadata({
       owner: "rob",
       session: "hub-1",
