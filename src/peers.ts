@@ -12,7 +12,7 @@ import {
   type NatsConnection,
 } from '@synadia-ai/agents'
 
-export type PeerIdentity = { runtime: string; owner: string; name: string }
+export type PeerIdentity = { runtime: string; owner: string; name: string; host?: string }
 
 export type PeerRow = PeerIdentity & {
   host?: string

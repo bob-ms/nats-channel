@@ -63,13 +63,16 @@ import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join, basename, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { buildServiceMetadata } from './registration'
+import { buildServiceMetadata, fleetHost } from './registration'
 import { registerAgent, type RegisteredAgent } from './register'
 import { PEER_TOOL_DEFS, callPeerTool, isPeerTool } from './tools'
 
 // ── Constants ──────────────────────────────────────────────────────────
 const AGENT_ID = 'claude-code'          // metadata.agent (canonical per Appendix C)
-const AGENT_SUBJECT_TOKEN = 'cc'        // 3rd subject token (abbreviation per Appendix C)
+// 3rd subject token (abbreviation per Appendix C). `NATS_AGENT_RUNTIME` lets a
+// non-cc embedder (the pi-mcp-adapter entry in ~/.pi/agent/mcp.json) claim its
+// own runtime in sender stamps instead of masquerading as cc.
+const AGENT_SUBJECT_TOKEN = process.env.NATS_AGENT_RUNTIME ?? 'cc'
 const ACK_INTERVAL_MS = 30_000          // keep-alive cadence; caller inactivity timeout is 60s
 const PERMISSION_TIMEOUT_MS = 120_000   // query reply timeout for permission prompts
 const REQUEST_TTL_MS = 30 * 60 * 1000
@@ -384,7 +387,11 @@ const owner = (process.env.SYNADIA_CLAUDE_CODE_OWNER
   ?? config.owner
   ?? sanitizeSessionName(process.env.USER ?? 'unknown'))
   || 'unknown'
-const rawSessionName = (process.env.SYNADIA_CLAUDE_CODE_NAME
+// `NATS_PEER_NAME` outranks everything: an embedder that spawns this server
+// per session (the pi controller) stamps the session's own name through it,
+// where the fleet-wide SYNADIA_* vars would leak the controller's identity.
+const rawSessionName = (process.env.NATS_PEER_NAME
+  ?? process.env.SYNADIA_CLAUDE_CODE_NAME
   ?? process.env.SYNADIA_NAME
   ?? process.env.NATS_SESSION_NAME
   ?? config.sessionName
@@ -662,7 +669,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const { text } = await callPeerTool(req.params.name, args, {
             nc,
             instanceId,
-            sender: { runtime: AGENT_SUBJECT_TOKEN, owner, name: sessionName },
+            sender: { runtime: AGENT_SUBJECT_TOKEN, owner, name: sessionName, host: fleetHost() },
           })
           return { content: [{ type: 'text', text }] }
         }
