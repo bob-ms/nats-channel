@@ -1,0 +1,13 @@
+{
+  "name": "bob-ms",
+  "owner": {
+    "name": "Rob Williams"
+  },
+  "plugins": [
+    {
+      "name": "nats-channel",
+      "source": "./",
+      "description": "hub's owned nats-channel fork: NATS channel provider plus fleet peer tools (list_agents, prompt_agent)."
+    }
+  ]
+}

@@ -64,3 +64,22 @@ bin/start   # exec bun src/server.ts
 `NATS_CONTEXT` / `NATS_URL` env vars (or `/nats-channel:configure`) select
 the broker; see `skills/configure/SKILL.md` for the full configuration
 surface.
+
+## Publishing
+
+This directory is mirrored to the public [bob-ms/nats-channel](https://github.com/bob-ms/nats-channel)
+repository, which serves as the `bob-ms` Claude Code plugin marketplace
+(`.claude-plugin/marketplace.json` at its root). hub is canonical; after
+changing this directory on main, republish with:
+
+```sh
+git subtree split --prefix=nats-channel -b nats-channel-split main
+git push git@github.com:bob-ms/nats-channel.git nats-channel-split:main
+git branch -D nats-channel-split
+```
+
+Bump the plugin version in `.claude-plugin/plugin.json` with any behavioural
+change — installed hosts update by version.
+
+Forked from Synadia's `nats-channel` plugin (synadia-ai/synadia-agents),
+Apache-2.0 — see `LICENSE`.
