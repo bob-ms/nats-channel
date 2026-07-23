@@ -12,6 +12,8 @@ import {
   afterAll,
   afterEach,
 } from 'bun:test'
+import { tmpdir } from 'node:os'
+import { rmSync } from 'node:fs'
 import { connect, headers, type NatsConnection } from '@nats-io/transport-node'
 import type { ServiceMsg } from '@nats-io/services'
 import { ReferenceAgent } from '@synadia-ai/agent-service/testing'
@@ -64,12 +66,19 @@ async function startAgent(opts: ConstructorParameters<typeof ReferenceAgent>[0])
   return ref
 }
 
+// JetStream is on so the BOB-475 tests can stand up a real stream over the
+// spawn subject; the store dir is per-process to survive parallel runs.
+const JS_STORE_DIR = `${tmpdir()}/nats-peers-test-js-${process.pid}`
+
 beforeAll(async () => {
   if (!hasServer) return
-  serverProc = Bun.spawn([serverBin, '-p', String(PORT), '-a', '127.0.0.1'], {
-    stdout: 'ignore',
-    stderr: 'ignore',
-  })
+  serverProc = Bun.spawn(
+    [serverBin, '-p', String(PORT), '-a', '127.0.0.1', '-js', '-sd', JS_STORE_DIR],
+    {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    },
+  )
   nc = await waitForConnectable(`127.0.0.1:${PORT}`)
 })
 
@@ -82,6 +91,7 @@ afterAll(async () => {
   }
   serverProc?.kill()
   await serverProc?.exited
+  rmSync(JS_STORE_DIR, { recursive: true, force: true })
 })
 
 afterEach(async () => {
@@ -389,6 +399,121 @@ describe.skipIf(!hasServer)('peers — integration', () => {
     await expect(
       spawnAgent(nc, { steward: 'control-deaf' }, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER),
     ).rejects.toThrow(/not listening on its spawn endpoint/i)
+  })
+
+  // ── BOB-475: the JetStream PubAck racing the steward reply ────────────────
+  // On the live plane the AGENTS_EVENTS stream (BOB-472 spawn records)
+  // captures `agents.spawn.>`, so the server's PubAck lands on the request
+  // inbox ahead of the steward's reply — 0.3.0's single-message request took
+  // the ack as the reply and every outcome surfaced as "no session_id". These
+  // tests stand up a REAL stream over the spawn subject via $JS.API (deleted
+  // after), so the ack is server-generated, not hand-rolled; the steward
+  // replies use the host pi controller's actual envelopes (controller.ts:
+  // success = SpawnDescriptor + spawn_token JSON body, error = respondError's
+  // Nats-Service-Error/-Code headers with an empty body).
+
+  async function withAgentsEventsStream(fn: () => Promise<void>): Promise<void> {
+    const create = await nc.request(
+      '$JS.API.STREAM.CREATE.AGENTS_EVENTS',
+      JSON.stringify({
+        name: 'AGENTS_EVENTS',
+        subjects: ['agents.spawn.>'],
+        storage: 'memory',
+        retention: 'limits',
+      }),
+      { timeout: 5000 },
+    )
+    const created = JSON.parse(new TextDecoder().decode(create.data)) as {
+      error?: { description?: string }
+    }
+    if (created.error) throw new Error(`stream create failed: ${created.error.description}`)
+    try {
+      await fn()
+    } finally {
+      await nc.request('$JS.API.STREAM.DELETE.AGENTS_EVENTS', new Uint8Array(0), { timeout: 5000 })
+    }
+  }
+
+  test('spawn success surfaces the child through the PubAck race (BOB-475)', async () => {
+    const ref = await startAgent({
+      nc,
+      agent: 'pi',
+      owner: 'rob',
+      name: 'control-red',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    const sub = nc.subscribe(spawnSubjectOf(ref), {
+      callback: (_err, msg) => {
+        const env = JSON.parse(new TextDecoder().decode(msg.data)) as { spawn_token: string }
+        void (async () => {
+          // Let the stream's PubAck land on the inbox first, as observed live.
+          await Bun.sleep(50)
+          msg.respond(
+            JSON.stringify({
+              session_id: 'e4omczqy7fzly49mu-667',
+              subject: 'agents.prompt.pi.rob.e4omczqy7fzly49mu-667',
+              heartbeat_subject: 'agents.hb.pi.rob.e4omczqy7fzly49mu-667',
+              status_subject: 'agents.status.pi.rob.e4omczqy7fzly49mu-667',
+              cwd: '/home/rob/worktrees/hub/e4omczqy7fzly49mu-667',
+              max_lifetime_s: 3600,
+              created_at: '2026-07-23T10:00:00.000Z',
+              instance_id: 'svc-instance-1',
+              spawn_token: env.spawn_token,
+            }),
+          )
+        })()
+      },
+    })
+    try {
+      await withAgentsEventsStream(async () => {
+        const res = await spawnAgent(
+          nc,
+          { steward: 'control-red' },
+          { repo: 'bob-ms/hub', prompt: 'go' },
+          SENDER,
+          { timeoutMs: 5000 },
+        )
+        expect(res.reply.session_id).toBe('e4omczqy7fzly49mu-667')
+        expect(res.reply.spawn_token).toBe(res.spawnToken)
+        expect(res.promptSubject).toBe('agents.prompt.pi.rob.e4omczqy7fzly49mu-667')
+      })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  test('steward errors surface verbatim through the PubAck race (BOB-475)', async () => {
+    const ref = await startAgent({
+      nc,
+      agent: 'pi',
+      owner: 'rob',
+      name: 'control-red',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    const sub = nc.subscribe(spawnSubjectOf(ref), {
+      callback: (_err, msg) => {
+        void (async () => {
+          await Bun.sleep(50)
+          const h = headers()
+          h.set('Nats-Service-Error-Code', '400')
+          h.set('Nats-Service-Error', 'repo must be org/repo: hub')
+          msg.respond(new Uint8Array(0), { headers: h })
+        })()
+      },
+    })
+    try {
+      await withAgentsEventsStream(async () => {
+        await expect(
+          spawnAgent(nc, { steward: 'control-red' }, { repo: 'hub', prompt: 'go' }, SENDER, {
+            timeoutMs: 5000,
+          }),
+        ).rejects.toThrow('steward control-red rejected the spawn (400): repo must be org/repo: hub')
+      })
+    } finally {
+      sub.unsubscribe()
+    }
   })
 
   test('self is excluded by instanceId', async () => {

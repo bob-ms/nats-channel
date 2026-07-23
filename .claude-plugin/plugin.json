@@ -1,7 +1,7 @@
 {
   "name": "nats-channel",
   "description": "NATS-backed channel provider for session-to-session RPC. Registers the session as a Synadia Agent Protocol for NATS v0.3 agent and stamps its A2A contextId into the plane registration.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "mcpServers": {
     "nats-channel": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/start"

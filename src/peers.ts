@@ -34,6 +34,18 @@ function isTerminator(bytes: Uint8Array): boolean {
   return bytes.byteLength === 0
 }
 
+/**
+ * A JetStream publish ack (`{"stream":"AGENTS_EVENTS","domain":"bobms","seq":6}`
+ * as captured live, BOB-475): what the server sends to the request inbox when a
+ * JetStream stream's subject space overlaps the requested subject. Never a
+ * steward reply — those carry `session_id` (success) or service-error headers.
+ */
+function isJetStreamPubAck(parsed: unknown): boolean {
+  if (typeof parsed !== 'object' || parsed === null) return false
+  const p = parsed as Record<string, unknown>
+  return typeof p.stream === 'string' && typeof p.seq === 'number' && !('session_id' in p)
+}
+
 export function rowFromAgent(agent: Agent): PeerRow {
   const role = agent.metadata.role ?? 'session'
   return {
@@ -254,32 +266,57 @@ export async function spawnAgent(
       sender,
     })
 
-    const m = await nc
-      .request(spawnSubject, new TextEncoder().encode(envelope), { timeout: timeoutMs })
-      .catch((e: Error) => {
-        if (/503|no responders/i.test(e.message)) {
-          throw new Error(`steward ${row.name} is not listening on its spawn endpoint (${spawnSubject})`)
-        }
-        throw new Error(
-          `steward ${row.name} did not answer the spawn within ${timeoutMs}ms — the spawn may still ` +
-            `be running; retry with the same spawn token (${spawnToken}) to learn its outcome`,
-        )
-      })
-
-    const errCode = m.headers?.get('Nats-Service-Error-Code')
-    if (errCode) {
-      const errMsg = m.headers?.get('Nats-Service-Error') || 'service error'
-      throw new Error(`steward ${row.name} rejected the spawn (${errCode}): ${errMsg}`)
-    }
-
-    let reply: SpawnAgentReply
+    // The spawn subject is also captured by the AGENTS_EVENTS JetStream stream
+    // (the BOB-472 spawn-record tree overlaps `agents.spawn.>`), so the request
+    // inbox receives the stream's PubAck alongside — and usually before — the
+    // steward's reply (BOB-475). Collect replies and let the first non-PubAck
+    // message decide the outcome.
+    let reply: SpawnAgentReply | undefined
+    let stewardError: Error | undefined
     try {
-      reply = JSON.parse(new TextDecoder().decode(m.data)) as SpawnAgentReply
-    } catch {
-      throw new Error(`steward ${row.name} returned an unparseable spawn reply`)
+      const iter = await nc.requestMany(spawnSubject, new TextEncoder().encode(envelope), {
+        maxWait: timeoutMs,
+      })
+      for await (const m of iter) {
+        const errCode = m.headers?.get('Nats-Service-Error-Code')
+        if (errCode) {
+          const errMsg = m.headers?.get('Nats-Service-Error') || 'service error'
+          stewardError = new Error(`steward ${row.name} rejected the spawn (${errCode}): ${errMsg}`)
+          break
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(new TextDecoder().decode(m.data))
+        } catch {
+          stewardError = new Error(`steward ${row.name} returned an unparseable spawn reply`)
+          break
+        }
+        if (isJetStreamPubAck(parsed)) continue
+        if (
+          typeof parsed !== 'object' ||
+          parsed === null ||
+          typeof (parsed as SpawnAgentReply).session_id !== 'string' ||
+          ((parsed as SpawnAgentReply).session_id as string).length === 0
+        ) {
+          stewardError = new Error(`steward ${row.name} returned a spawn reply without a session_id`)
+          break
+        }
+        reply = parsed as SpawnAgentReply
+        break
+      }
+    } catch (e) {
+      if (e instanceof Error && /503|no responders/i.test(e.message)) {
+        throw new Error(`steward ${row.name} is not listening on its spawn endpoint (${spawnSubject})`)
+      }
+      throw e
     }
-    if (typeof reply.session_id !== 'string' || reply.session_id.length === 0) {
-      throw new Error(`steward ${row.name} returned a spawn reply without a session_id`)
+
+    if (stewardError) throw stewardError
+    if (reply === undefined) {
+      throw new Error(
+        `steward ${row.name} did not answer the spawn within ${timeoutMs}ms — the spawn may still ` +
+          `be running; retry with the same spawn token (${spawnToken}) to learn its outcome`,
+      )
     }
 
     return {
