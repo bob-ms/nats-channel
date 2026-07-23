@@ -63,7 +63,7 @@ import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join, basename, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { buildServiceMetadata, fleetHost } from './registration'
+import { buildServiceMetadata, deriveHarnessIdentity, fleetHost } from './registration'
 import { mintSessionName, resolveSessionNanoid } from './identity'
 import { registerAgent, type RegisteredAgent } from './register'
 import { PEER_TOOL_DEFS, callPeerTool, isPeerTool } from './tools'
@@ -458,10 +458,25 @@ const NO_REGISTER = /^(1|true|yes)$/i.test(process.env.NATS_NO_REGISTER ?? '')
 // §8.3 heartbeat/status payload, built once the instance id is known. The lazy
 // per-session `context_id` read (keyed by `CLAUDE_CODE_SESSION_ID`, never the
 // static per-user `config.json`) happens inside `buildServiceMetadata` below.
+//
+// BOB-460/468: heartbeats carry harness-emitted org/repo/worktree/host plus
+// the session nanoid — facts the harness observes about its own runtime, not
+// agent-authored content — so a record-less interactive session still gets a
+// joinable identity out of AGENTS_HB's last-value bucket. The §8.7 status
+// endpoint (register.ts) replies with this same function's output unchanged.
+const harnessIdentity = deriveHarnessIdentity(process.env.CLAUDE_CWD ?? process.env.PWD)
+const heartbeatHost = fleetHost()
 function buildHeartbeatBytes(id: string): Uint8Array {
   return encodeHeartbeatPayload(
     buildHeartbeatPayload(agentSubject, HEARTBEAT_INTERVAL_S, id, {
       session: sessionName,
+      extras: {
+        host: heartbeatHost,
+        session_nanoid: sessionName,
+        ...(harnessIdentity.org ? { org: harnessIdentity.org } : {}),
+        ...(harnessIdentity.repo ? { repo: harnessIdentity.repo } : {}),
+        ...(harnessIdentity.worktree ? { worktree: harnessIdentity.worktree } : {}),
+      },
     }),
   )
 }

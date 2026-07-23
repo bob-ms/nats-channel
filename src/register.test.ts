@@ -4,7 +4,9 @@
 // service manager — no live NATS needed — so the guard is provable in isolation.
 
 import { describe, expect, test } from 'bun:test'
-import { SERVICE_NAME } from '@synadia-ai/agents'
+import { AgentSubject, SERVICE_NAME } from '@synadia-ai/agents'
+import { buildHeartbeatPayload, encodeHeartbeatPayload } from '@synadia-ai/agent-service'
+import type { ServiceMsg } from '@nats-io/services'
 
 import {
   registerAgent,
@@ -12,6 +14,7 @@ import {
   type ServiceLike,
   type ServiceManagerLike,
 } from './register'
+import { deriveHarnessIdentity } from './registration'
 
 function makeSpySvcm() {
   const addConfigs: Array<Record<string, unknown>> = []
@@ -113,6 +116,92 @@ describe('registerAgent — NATS_NO_REGISTER guard (BOB-416)', () => {
     const result = await registerAgent(opts)
 
     expect(endpoints).toEqual(['prompt', 'status'])
+    clearInterval(result!.heartbeatTimer)
+  })
+})
+
+describe('registerAgent — heartbeat identity payload (BOB-460/468)', () => {
+  test('org/repo/worktree/host/session_nanoid land on the periodic heartbeat and the §8.7 status reply', async () => {
+    const identity = deriveHarnessIdentity('/Users/rob/repos/bob-ms/hub/bob-468-hb-identity')
+    const subject = AgentSubject.new('claude-code', 'rob', 'sess-nanoid-abc', { subjectToken: 'cc' })
+
+    function buildHeartbeat(id: string): Uint8Array {
+      return encodeHeartbeatPayload(
+        buildHeartbeatPayload(subject, 30, id, {
+          session: 'sess-nanoid-abc',
+          extras: {
+            host: 'm3',
+            session_nanoid: 'sess-nanoid-abc',
+            org: identity.org,
+            repo: identity.repo,
+            worktree: identity.worktree,
+          },
+        }),
+      )
+    }
+
+    const statusHandlers: Record<string, (err: Error | null, msg: ServiceMsg) => void> = {}
+    const service: ServiceLike = {
+      addEndpoint: (name, endpointOpts) => {
+        statusHandlers[name] = (endpointOpts as { handler: (err: Error | null, msg: ServiceMsg) => void }).handler
+      },
+      info: () => ({ id: 'inst-xyz' }),
+      stop: async () => {},
+    }
+    const svcm: ServiceManagerLike = { add: async () => service }
+
+    const publishes: Array<{ subject: string; payload: Uint8Array }> = []
+    const opts: RegisterAgentOptions = {
+      noRegister: false,
+      nc: {
+        publish: (subject: string, payload?: Uint8Array) =>
+          void publishes.push({ subject, payload: payload ?? new Uint8Array() }),
+      },
+      svcm,
+      serviceName: SERVICE_NAME,
+      version: '9.9.9',
+      description: 'Claude Code — test',
+      metadata: { agent: 'claude-code', owner: 'rob' },
+      promptSubject: 'agents.prompt.cc.rob.test',
+      promptQueue: 'prompt-q',
+      promptMetadata: { max_payload: '1MB' },
+      statusSubject: 'agents.status.cc.rob.test',
+      statusQueue: 'status-q',
+      heartbeatSubject: 'agents.hb.cc.rob.test',
+      heartbeatIntervalMs: 5000,
+      onPrompt: () => {},
+      buildHeartbeat,
+    }
+
+    const result = await registerAgent(opts)
+
+    const published = publishes.find((p) => p.subject === 'agents.hb.cc.rob.test')
+    expect(published).toBeDefined()
+    const heartbeatBody = JSON.parse(new TextDecoder().decode(published!.payload))
+
+    // Harness facts, not agent-authored: org/repo/worktree derive from the
+    // fleet checkout layout, host and session_nanoid from the runtime.
+    expect(heartbeatBody.org).toBe('bob-ms')
+    expect(heartbeatBody.repo).toBe('hub')
+    expect(heartbeatBody.worktree).toBe('bob-468-hb-identity')
+    expect(heartbeatBody.host).toBe('m3')
+    expect(heartbeatBody.session_nanoid).toBe('sess-nanoid-abc')
+
+    let statusReply: Uint8Array | undefined
+    statusHandlers.status!(null, {
+      respond: (bytes: Uint8Array) => {
+        statusReply = bytes
+      },
+      respondError: () => {},
+    } as unknown as ServiceMsg)
+
+    expect(statusReply).toBeDefined()
+    const statusBody = JSON.parse(new TextDecoder().decode(statusReply!))
+    // Same builder, same fields — only `ts` may drift between the two calls.
+    delete heartbeatBody.ts
+    delete statusBody.ts
+    expect(statusBody).toEqual(heartbeatBody)
+
     clearInterval(result!.heartbeatTimer)
   })
 })

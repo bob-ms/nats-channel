@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeMapping } from "./identity";
-import { buildServiceMetadata, fleetHost } from "./registration";
+import { buildServiceMetadata, deriveHarnessIdentity, fleetHost } from "./registration";
 
 let mappingDir: string;
 
@@ -118,5 +118,43 @@ describe("fleetHost — short fleet host derivation (BOB-409)", () => {
     delete process.env.BOBMS_HOST;
     expect(fleetHost()).not.toContain(".");
     expect(fleetHost().length).toBeGreaterThan(0);
+  });
+});
+
+describe("deriveHarnessIdentity — org/repo/worktree from the fleet checkout layout (BOB-468)", () => {
+  test("parses org/repo/worktree out of a ~/repos/<org>/<repo>/<worktree> cwd", () => {
+    expect(deriveHarnessIdentity("/Users/rob/repos/bob-ms/hub/bob-468-hb-identity")).toEqual({
+      org: "bob-ms",
+      repo: "hub",
+      worktree: "bob-468-hb-identity",
+    });
+  });
+
+  test("main checkout worktree segment is literally 'main'", () => {
+    expect(deriveHarnessIdentity("/Users/rob/repos/yourtradebase/web-app/main")).toEqual({
+      org: "yourtradebase",
+      repo: "web-app",
+      worktree: "main",
+    });
+  });
+
+  test("extra path segments past the worktree are ignored", () => {
+    expect(deriveHarnessIdentity("/Users/rob/repos/bob-ms/hub/main/nats-channel/src")).toEqual({
+      org: "bob-ms",
+      repo: "hub",
+      worktree: "main",
+    });
+  });
+
+  test("no 'repos' segment → empty (undefined fields, never invented)", () => {
+    expect(deriveHarnessIdentity("/Users/rob/scratch")).toEqual({});
+  });
+
+  test("'repos' segment present but too shallow → empty", () => {
+    expect(deriveHarnessIdentity("/Users/rob/repos/bob-ms")).toEqual({});
+  });
+
+  test("undefined cwd → empty", () => {
+    expect(deriveHarnessIdentity(undefined)).toEqual({});
   });
 });

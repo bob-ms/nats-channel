@@ -45,6 +45,29 @@ export function fleetHost(): string {
   return hostname().split(".")[0] ?? hostname();
 }
 
+export type HarnessIdentity = {
+  org?: string;
+  repo?: string;
+  worktree?: string;
+};
+
+/**
+ * Parse `org`/`repo`/`worktree` from a `~/repos/<org>/<repo>/<worktree>`
+ * checkout path — the fleet-wide layout convention every repo's CLAUDE.md
+ * documents (main checkouts land on `main`/`current`, feature worktrees sit
+ * beside them). Fields are undefined when `cwd` doesn't fall under a
+ * `repos/` segment — a harness fact derived from where the process runs,
+ * never agent-authored.
+ */
+export function deriveHarnessIdentity(cwd: string | undefined): HarnessIdentity {
+  if (!cwd) return {};
+  const segments = cwd.split("/").filter(Boolean);
+  const reposIdx = segments.indexOf("repos");
+  if (reposIdx === -1 || segments.length < reposIdx + 4) return {};
+  const [org, repo, worktree] = segments.slice(reposIdx + 1, reposIdx + 4);
+  return { org, repo, worktree };
+}
+
 export function buildServiceMetadata(input: BuildServiceMetadataInput): ServiceMetadata {
   const { owner, session, protocolVersion, agent = "claude-code", sessionId, mappingDir, host } = input;
 
