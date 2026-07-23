@@ -12,11 +12,11 @@ import {
   afterAll,
   afterEach,
 } from 'bun:test'
-import { connect, type NatsConnection } from '@nats-io/transport-node'
+import { connect, headers, type NatsConnection } from '@nats-io/transport-node'
 import type { ServiceMsg } from '@nats-io/services'
 import { ReferenceAgent } from '@synadia-ai/agent-service/testing'
 import { encodeChunk } from '@synadia-ai/agent-service'
-import { listPeers, promptPeer, type PeerIdentity } from './peers'
+import { listPeers, promptPeer, spawnAgent, type PeerIdentity } from './peers'
 
 const SERVER_BIN = '/opt/homebrew/bin/nats-server'
 const hasServer = (() => {
@@ -223,6 +223,172 @@ describe.skipIf(!hasServer)('peers — integration', () => {
 
     rows = await listPeers(nc)
     expect(rows.some(r => r.name === 'peer-transient')).toBe(false)
+  })
+
+  // ── spawn_agent (BOB-473) ─────────────────────────────────────────────────
+  // The fake steward is a controller-role ReferenceAgent for discovery plus a
+  // plain subscription on its derived spawn subject standing in for the host
+  // controllers' spawn endpoint (request/reply, service-error headers).
+
+  function spawnSubjectOf(ref: ReferenceAgent): string {
+    return ref.promptSubject
+      .split('.')
+      .map((t, i) => (i === 1 ? 'spawn' : t))
+      .join('.')
+  }
+
+  test('spawnAgent frames the request, mints a nanoid spawn token, and stamps the sender', async () => {
+    const ref = await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-spawn',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    const captured: { payload?: Record<string, unknown> } = {}
+    const sub = nc.subscribe(spawnSubjectOf(ref), {
+      callback: (_err, msg) => {
+        captured.payload = JSON.parse(new TextDecoder().decode(msg.data)) as Record<string, unknown>
+        msg.respond(
+          JSON.stringify({
+            session_id: 'k3x9m2vp7h4wz8n1t5rj6',
+            spawn_token: captured.payload.spawn_token,
+            cwd: '/tmp/wt',
+          }),
+        )
+      },
+    })
+    try {
+      const res = await spawnAgent(
+        nc,
+        {},
+        { repo: 'bob-ms/hub', base: 'main', prompt: '/drain', model: 'sonnet', maxLifetimeS: 3600 },
+        SENDER,
+      )
+      expect(res.reply.session_id).toBe('k3x9m2vp7h4wz8n1t5rj6')
+      expect(res.promptSubject).toBe('agents.prompt.cc.rob.k3x9m2vp7h4wz8n1t5rj6')
+      expect(res.steward.name).toBe('control-spawn')
+      expect(captured.payload).toMatchObject({
+        repo: 'bob-ms/hub',
+        base: 'main',
+        prompt: '/drain',
+        model: 'sonnet',
+        max_lifetime_s: 3600,
+      })
+      // Plugin-minted spawn token: the 21-char subject-safe nanoid shape.
+      expect(captured.payload!.spawn_token).toMatch(/^[0-9a-z_-]{21}$/)
+      expect(res.spawnToken).toBe(captured.payload!.spawn_token as string)
+      // Claimed requester stamp, attached exactly as promptPeer attaches it.
+      expect(captured.payload!.sender).toEqual(SENDER)
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  test('spawnAgent omits absent optional fields from the wire request', async () => {
+    const ref = await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-min',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    const captured: { payload?: Record<string, unknown> } = {}
+    const sub = nc.subscribe(spawnSubjectOf(ref), {
+      callback: (_err, msg) => {
+        captured.payload = JSON.parse(new TextDecoder().decode(msg.data)) as Record<string, unknown>
+        msg.respond(JSON.stringify({ session_id: 'a1b2c3d4e5f6g7h8i9j0k' }))
+      },
+    })
+    try {
+      await spawnAgent(nc, {}, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER)
+      expect(Object.keys(captured.payload!).sort()).toEqual(['prompt', 'repo', 'sender', 'spawn_token'])
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  test('steward service errors surface verbatim', async () => {
+    const ref = await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-err',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    const stewardMessage =
+      'spawn attempt for this token (child a1b2, started 2026-07-23T00:00:00Z) exceeded the 120000ms spawn timeout and is adjudicated crashed — mint a fresh spawn token to retry'
+    const sub = nc.subscribe(spawnSubjectOf(ref), {
+      callback: (_err, msg) => {
+        const h = headers()
+        h.set('Nats-Service-Error-Code', '409')
+        h.set('Nats-Service-Error', stewardMessage)
+        msg.respond(new Uint8Array(0), { headers: h })
+      },
+    })
+    try {
+      await expect(
+        spawnAgent(nc, { steward: 'control-err' }, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER),
+      ).rejects.toThrow(`steward control-err rejected the spawn (409): ${stewardMessage}`)
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  test('no live steward — and plain sessions are never spawn targets', async () => {
+    await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'peer-not-steward',
+      heartbeatIntervalS: 1,
+    })
+    await expect(
+      spawnAgent(nc, { steward: 'peer-not-steward' }, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER),
+    ).rejects.toThrow(/no live steward/i)
+    await expect(spawnAgent(nc, {}, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER)).rejects.toThrow(
+      /no live steward/i,
+    )
+  })
+
+  test('two live stewards without a target is ambiguous', async () => {
+    await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-a',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-b',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    await expect(spawnAgent(nc, {}, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER)).rejects.toThrow(
+      /ambiguous|more than one live steward/i,
+    )
+  })
+
+  test('spawnAgent surfaces a missing spawn endpoint distinctly', async () => {
+    await startAgent({
+      nc,
+      agent: 'cc',
+      owner: 'rob',
+      name: 'control-deaf',
+      extraMetadata: { role: 'controller' },
+      heartbeatIntervalS: 1,
+    })
+    // Controller discovered, but nothing subscribed on its spawn subject.
+    await expect(
+      spawnAgent(nc, { steward: 'control-deaf' }, { repo: 'bob-ms/hub', prompt: 'go' }, SENDER),
+    ).rejects.toThrow(/not listening on its spawn endpoint/i)
   })
 
   test('self is excluded by instanceId', async () => {

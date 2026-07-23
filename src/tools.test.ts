@@ -10,17 +10,24 @@ import { connect, type NatsConnection } from '@nats-io/transport-node'
 import { PEER_TOOL_DEFS, callPeerTool, isPeerTool, type PeerToolDeps } from './tools'
 
 describe('PEER_TOOL_DEFS — registered tool surface', () => {
-  test('exposes list_agents and prompt_agent with the expected shape', () => {
+  test('exposes list_agents, prompt_agent, and spawn_agent with the expected shape', () => {
     const names = PEER_TOOL_DEFS.map((t) => t.name)
-    expect(names).toEqual(['list_agents', 'prompt_agent'])
+    expect(names).toEqual(['list_agents', 'prompt_agent', 'spawn_agent'])
 
     const promptAgent = PEER_TOOL_DEFS.find((t) => t.name === 'prompt_agent')!
     expect(promptAgent.inputSchema.required).toEqual(['name', 'prompt'])
+
+    const spawnAgent = PEER_TOOL_DEFS.find((t) => t.name === 'spawn_agent')!
+    expect(spawnAgent.inputSchema.required).toEqual(['repo', 'prompt'])
+    expect(Object.keys(spawnAgent.inputSchema.properties)).toEqual(
+      expect.arrayContaining(['repo', 'prompt', 'base', 'model', 'max_lifetime_s', 'steward', 'owner', 'runtime']),
+    )
   })
 
-  test('isPeerTool recognises the two peer tools and nothing else', () => {
+  test('isPeerTool recognises the peer tools and nothing else', () => {
     expect(isPeerTool('list_agents')).toBe(true)
     expect(isPeerTool('prompt_agent')).toBe(true)
+    expect(isPeerTool('spawn_agent')).toBe(true)
     expect(isPeerTool('reply')).toBe(false)
     expect(isPeerTool('nope')).toBe(false)
   })
@@ -103,5 +110,11 @@ describe.skipIf(!hasServer)('callPeerTool — dispatch against live NATS', () =>
     await expect(
       callPeerTool('prompt_agent', { name: 'nobody-here', prompt: 'x' }, DEPS()),
     ).rejects.toThrow(/unknown|unreachable|no live peer/i)
+  })
+
+  test('spawn_agent with no live steward surfaces a clear error', async () => {
+    await expect(
+      callPeerTool('spawn_agent', { repo: 'bob-ms/hub', prompt: 'go' }, DEPS()),
+    ).rejects.toThrow(/no live steward/i)
   })
 })
