@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const DEFAULT_MAPPING_DIR = join(homedir(), ".claude", "bobms", "context-ids");
+export const DEFAULT_NAME_MAPPING_DIR = join(homedir(), ".claude", "bobms", "session-names");
 
 function randomHex(nBytes: number): string {
   const bytes = new Uint8Array(nBytes);
@@ -25,6 +26,32 @@ function randomHex(nBytes: number): string {
  */
 export function mintContextId(): string {
   return `ctx-${randomHex(7)}`;
+}
+
+// Subject-safe nanoid alphabet: satisfies both the SDK's forbidden-char rule
+// and its recommended token charset (`^[a-z0-9_-]+$`).
+const SESSION_NAME_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz_-";
+const SESSION_NAME_LENGTH = 21;
+
+/**
+ * Mint a session wire name: a 21-char CSPRNG nanoid (BOB-432's canonical
+ * identity shape). Unbiased via rejection sampling over a 38-char
+ * subject-safe alphabet (~110 bits).
+ */
+export function mintSessionName(): string {
+  let out = "";
+  while (out.length < SESSION_NAME_LENGTH) {
+    const bytes = new Uint8Array(SESSION_NAME_LENGTH * 2);
+    globalThis.crypto.getRandomValues(bytes);
+    for (const b of bytes) {
+      const idx = b & 63;
+      if (idx < SESSION_NAME_ALPHABET.length) {
+        out += SESSION_NAME_ALPHABET[idx];
+        if (out.length === SESSION_NAME_LENGTH) break;
+      }
+    }
+  }
+  return out;
 }
 
 export function mappingPath(sessionId: string, mappingDir: string = DEFAULT_MAPPING_DIR): string {
@@ -80,6 +107,35 @@ export function resolveContextId(input: ResolveContextIdInput): string {
   if (persisted) return persisted;
 
   const minted = mintContextId();
+  writeMapping(sessionId, minted, mappingDir);
+  return minted;
+}
+
+export type ResolveSessionNanoidInput = {
+  sessionId: string;
+  /** `NATS_SESSION_NAME` — injected by the steward at spawn (BOB-460 identity contract). */
+  envSessionName?: string;
+  mappingDir?: string;
+};
+
+/**
+ * The session wire-name twin of `resolveContextId`, same precedence rule:
+ * `NATS_SESSION_NAME` env > persisted mapping > mint a fresh nanoid. A
+ * steward-injected name is adopted and persisted; an uninjected interactive
+ * session mints once and reuses across resume/compact via the mapping.
+ */
+export function resolveSessionNanoid(input: ResolveSessionNanoidInput): string {
+  const { sessionId, envSessionName, mappingDir = DEFAULT_NAME_MAPPING_DIR } = input;
+
+  if (envSessionName) {
+    writeMapping(sessionId, envSessionName, mappingDir);
+    return envSessionName;
+  }
+
+  const persisted = readMapping(sessionId, mappingDir);
+  if (persisted) return persisted;
+
+  const minted = mintSessionName();
   writeMapping(sessionId, minted, mappingDir);
   return minted;
 }

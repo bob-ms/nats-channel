@@ -11,7 +11,7 @@
 // Hard rule shared with the skills-repo session-event emitter: this must
 // never break a session. Best-effort, bounded, always exits 0.
 
-import { resolveContextId } from "../src/identity";
+import { resolveContextId, resolveSessionNanoid } from "../src/identity";
 
 type SessionStartInput = {
   session_id?: string;
@@ -33,6 +33,10 @@ try {
     resolveContextId({
       sessionId,
       envContextId: process.env.BOBMS_A2A_CONTEXT_ID,
+    });
+    resolveSessionNanoid({
+      sessionId,
+      envSessionName: process.env.NATS_SESSION_NAME,
     });
   }
 } catch (err) {

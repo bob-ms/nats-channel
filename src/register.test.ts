@@ -87,4 +87,32 @@ describe('registerAgent — NATS_NO_REGISTER guard (BOB-416)', () => {
 
     clearInterval(result!.heartbeatTimer)
   })
+
+  test('alias set → adds prompt-alias/status-alias endpoints; heartbeat stays canonical-only', async () => {
+    const { svcm, endpoints } = makeSpySvcm()
+    const { opts, publishes } = makeOpts({
+      svcm,
+      alias: {
+        promptSubject: 'agents.prompt.cc.rob.old-cwd-name',
+        statusSubject: 'agents.status.cc.rob.old-cwd-name',
+      },
+    })
+
+    const result = await registerAgent(opts)
+
+    expect(endpoints).toEqual(['prompt', 'status', 'prompt-alias', 'status-alias'])
+    expect(publishes.every((p) => p.subject === 'agents.hb.cc.rob.test')).toBe(true)
+
+    clearInterval(result!.heartbeatTimer)
+  })
+
+  test('no alias → endpoints unchanged', async () => {
+    const { svcm, endpoints } = makeSpySvcm()
+    const { opts } = makeOpts({ svcm })
+
+    const result = await registerAgent(opts)
+
+    expect(endpoints).toEqual(['prompt', 'status'])
+    clearInterval(result!.heartbeatTimer)
+  })
 })

@@ -64,6 +64,7 @@ import { homedir } from 'os'
 import { join, basename, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildServiceMetadata, fleetHost } from './registration'
+import { mintSessionName, resolveSessionNanoid } from './identity'
 import { registerAgent, type RegisteredAgent } from './register'
 import { PEER_TOOL_DEFS, callPeerTool, isPeerTool } from './tools'
 
@@ -387,15 +388,23 @@ const owner = (process.env.SYNADIA_CLAUDE_CODE_OWNER
   ?? config.owner
   ?? sanitizeSessionName(process.env.USER ?? 'unknown'))
   || 'unknown'
-// `NATS_PEER_NAME` outranks everything: an embedder that spawns this server
-// per session (the pi controller) stamps the session's own name through it,
-// where the fleet-wide SYNADIA_* vars would leak the controller's identity.
-const rawSessionName = (process.env.NATS_PEER_NAME
+// `NATS_SESSION_NAME` outranks everything: the steward-injected canonical
+// name (BOB-460 identity contract — minted pre-start, same string across
+// wire, record, heartbeat, and stop). `NATS_PEER_NAME` stays next for the
+// per-session embedder (the pi controller), ahead of the fleet-wide
+// SYNADIA_* vars that would leak the controller's identity.
+const explicitSessionName = process.env.NATS_SESSION_NAME
+  ?? process.env.NATS_PEER_NAME
   ?? process.env.SYNADIA_CLAUDE_CODE_NAME
   ?? process.env.SYNADIA_NAME
-  ?? process.env.NATS_SESSION_NAME
   ?? config.sessionName
-  ?? sanitizeSessionName(basename(process.env.CLAUDE_CWD ?? process.env.PWD ?? '')))
+const cwdDerivedName = sanitizeSessionName(basename(process.env.CLAUDE_CWD ?? process.env.PWD ?? ''))
+// Absent any explicit name, publish under the session nanoid (persisted per
+// session id, so resume/compact keep the same wire name); the old cwd-derived
+// name answers as an alias during the cutover window (see below).
+const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID
+const rawSessionName = (explicitSessionName
+  ?? (claudeSessionId ? resolveSessionNanoid({ sessionId: claudeSessionId }) : mintSessionName()))
   || 'default'
 
 const sessionName = await resolveSessionName(nc, rawSessionName, owner)
@@ -420,6 +429,23 @@ const agentSubject = (() => {
 const subject = agentSubject.prompt
 const heartbeatSubject = agentSubject.heartbeat
 const statusSubject = agentSubject.status
+
+// Alias window for the nanoid cutover: an uninjected session that used to
+// publish under its cwd basename keeps answering there — prompt/status only,
+// heartbeats stay on the canonical name — so existing addressers survive the
+// rename. Skipped when the cwd name is already owned by a live peer (the old
+// dedup would have suffixed us off it anyway).
+const aliasSubject = await (async () => {
+  if (explicitSessionName || !cwdDerivedName || cwdDerivedName === sessionName) return null
+  if (await resolveSessionName(nc, cwdDerivedName, owner) !== cwdDerivedName) return null
+  try {
+    return AgentSubject.new(AGENT_ID, owner, cwdDerivedName, {
+      subjectToken: AGENT_SUBJECT_TOKEN,
+    })
+  } catch {
+    return null
+  }
+})()
 
 // Tools-only launch mode (BOB-416): `NATS_NO_REGISTER` skips all plane
 // registration — no `svcm.add`, no prompt/status endpoints, no heartbeat —
@@ -464,13 +490,17 @@ const registered: RegisteredAgent | null = await registerAgent({
   heartbeatIntervalMs: HEARTBEAT_INTERVAL_S * 1000,
   onPrompt: handleNatsMessage,
   buildHeartbeat: buildHeartbeatBytes,
+  alias: aliasSubject
+    ? { promptSubject: aliasSubject.prompt, statusSubject: aliasSubject.status }
+    : undefined,
 })
 
 // Undefined in tools-only mode; `list_agents` self-exclusion is then a no-op.
 const instanceId = registered?.instanceId
 
 if (registered) {
-  process.stderr.write(`nats channel: micro service registered (id=${instanceId}) on ${subject}\n`)
+  const aliasNote = aliasSubject ? ` (alias ${aliasSubject.prompt})` : ''
+  process.stderr.write(`nats channel: micro service registered (id=${instanceId}) on ${subject}${aliasNote}\n`)
 } else {
   process.stderr.write(`nats channel: NATS_NO_REGISTER set — tools-only mode, no plane registration\n`)
 }

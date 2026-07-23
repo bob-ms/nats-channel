@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { homedir } from "node:os";
 import { rmSync } from "node:fs";
-import { mappingPath, writeMapping } from "../src/identity";
+import { DEFAULT_NAME_MAPPING_DIR, mappingPath, writeMapping } from "../src/identity";
 
 const SCRIPT = `${import.meta.dir}/nats-session-event.ts`;
 const HOME = homedir();
@@ -86,6 +86,74 @@ test("omits context_id cleanly when no mapping exists — never throws, never an
   const body = JSON.parse(stdout.slice(newline + 1).trim());
   expect(body.context_id).toBeUndefined();
   expect("context_id" in body).toBe(false);
+});
+
+const liveNameMappingSessionIds: string[] = [];
+afterEach(() => {
+  for (const sid of liveNameMappingSessionIds.splice(0)) {
+    rmSync(mappingPath(sid, DEFAULT_NAME_MAPPING_DIR), { force: true });
+  }
+});
+
+test("stamps session_name from the persisted name mapping", async () => {
+  const sessionId = "test-session-name-mapping-bob464";
+  liveNameMappingSessionIds.push(sessionId);
+  writeMapping(sessionId, "minted-nanoid-name-x1", DEFAULT_NAME_MAPPING_DIR);
+
+  const payload = { hook_event_name: "Stop", session_id: sessionId, cwd: `${HOME}/Projects/bob-ms/skills` };
+  const env = { ...process.env };
+  delete env.NATS_SESSION_NAME;
+  const proc = Bun.spawn(["bun", SCRIPT, "--echo", "Stop"], {
+    stdin: new Blob([JSON.stringify(payload)]),
+    stdout: "pipe",
+    stderr: "ignore",
+    env,
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+
+  const body = JSON.parse(stdout.slice(stdout.indexOf("\n") + 1).trim());
+  expect(body.session_name).toBe("minted-nanoid-name-x1");
+});
+
+test("steward-injected NATS_SESSION_NAME outranks the persisted name mapping", async () => {
+  const sessionId = "test-session-name-env-bob464";
+  liveNameMappingSessionIds.push(sessionId);
+  writeMapping(sessionId, "persisted-name", DEFAULT_NAME_MAPPING_DIR);
+
+  const payload = { hook_event_name: "Stop", session_id: sessionId, cwd: `${HOME}/Projects/bob-ms/skills` };
+  const proc = Bun.spawn(["bun", SCRIPT, "--echo", "Stop"], {
+    stdin: new Blob([JSON.stringify(payload)]),
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { ...process.env, NATS_SESSION_NAME: "steward-injected-name" },
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+
+  const body = JSON.parse(stdout.slice(stdout.indexOf("\n") + 1).trim());
+  expect(body.session_name).toBe("steward-injected-name");
+});
+
+test("omits session_name when neither env nor mapping exists", async () => {
+  const payload = {
+    hook_event_name: "Stop",
+    session_id: "test-session-truly-unnamed",
+    cwd: `${HOME}/Projects/bob-ms/skills`,
+  };
+  const env = { ...process.env };
+  delete env.NATS_SESSION_NAME;
+  const proc = Bun.spawn(["bun", SCRIPT, "--echo", "Stop"], {
+    stdin: new Blob([JSON.stringify(payload)]),
+    stdout: "pipe",
+    stderr: "ignore",
+    env,
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+
+  const body = JSON.parse(stdout.slice(stdout.indexOf("\n") + 1).trim());
+  expect("session_name" in body).toBe(false);
 });
 
 test("stamps task_id from BOBMS_A2A_TASK_ID env when present", async () => {

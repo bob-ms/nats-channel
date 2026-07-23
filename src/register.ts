@@ -48,6 +48,12 @@ export type RegisterAgentOptions = {
   onPrompt: (err: Error | null, msg: ServiceMsg) => void
   /** Builds the §8.3 heartbeat/status payload once the instanceId is known. */
   buildHeartbeat: (instanceId: string) => Uint8Array
+  /**
+   * Cutover alias (BOB-464 nanoid adoption): extra prompt/status endpoints
+   * under the session's old cwd-derived name, same handlers, no heartbeat —
+   * existing addressers keep working during the rename window.
+   */
+  alias?: { promptSubject: string; statusSubject: string }
 }
 
 /**
@@ -99,6 +105,31 @@ export async function registerAgent(
       }
     },
   })
+
+  if (opts.alias) {
+    service.addEndpoint('prompt-alias', {
+      subject: opts.alias.promptSubject,
+      queue: opts.promptQueue,
+      handler: (err: Error | null, msg: ServiceMsg) => opts.onPrompt(err, msg),
+      metadata: opts.promptMetadata,
+    })
+    service.addEndpoint('status-alias', {
+      subject: opts.alias.statusSubject,
+      queue: opts.statusQueue,
+      handler: (err: Error | null, msg: ServiceMsg) => {
+        if (err) return
+        try {
+          msg.respond(opts.buildHeartbeat(instanceId))
+        } catch (e) {
+          try {
+            msg.respondError(500, `status handler error: ${(e as Error).message}`)
+          } catch {
+            // connection may already be gone
+          }
+        }
+      },
+    })
+  }
 
   const publishHeartbeat = (): void => {
     opts.nc.publish(opts.heartbeatSubject, opts.buildHeartbeat(instanceId))

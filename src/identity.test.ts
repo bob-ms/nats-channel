@@ -2,7 +2,14 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mintContextId, readMapping, resolveContextId, writeMapping } from "./identity";
+import {
+  mintContextId,
+  mintSessionName,
+  readMapping,
+  resolveContextId,
+  resolveSessionNanoid,
+  writeMapping,
+} from "./identity";
 
 describe("mintContextId", () => {
   test("returns ctx- + 12-16 lowercase hex chars", () => {
@@ -78,5 +85,56 @@ describe("resolveContextId — precedence: env > persisted mapping > mint fresh"
   test("forked/seeded session (new session id, no mapping) mints fresh without crashing", () => {
     const id = resolveContextId({ sessionId: "forked-session-id", mappingDir });
     expect(id).toMatch(/^ctx-[0-9a-f]{12,16}$/);
+  });
+});
+
+describe("mintSessionName", () => {
+  test("returns 21 chars from the subject-safe recommended alphabet", () => {
+    for (let i = 0; i < 20; i++) {
+      expect(mintSessionName()).toMatch(/^[a-z0-9_-]{21}$/);
+    }
+  });
+
+  test("mints are not deterministic", () => {
+    expect(mintSessionName()).not.toBe(mintSessionName());
+  });
+});
+
+describe("resolveSessionNanoid — precedence: NATS_SESSION_NAME > persisted mapping > mint nanoid", () => {
+  test("steward-injected NATS_SESSION_NAME wins even when a mapping already exists", () => {
+    writeMapping("sess-1", "existing-nanoid-name", mappingDir);
+
+    const name = resolveSessionNanoid({
+      sessionId: "sess-1",
+      envSessionName: "steward-minted-name",
+      mappingDir,
+    });
+
+    expect(name).toBe("steward-minted-name");
+  });
+
+  test("injected name adoption persists to the mapping", () => {
+    resolveSessionNanoid({
+      sessionId: "sess-1",
+      envSessionName: "steward-minted-name",
+      mappingDir,
+    });
+
+    expect(readMapping("sess-1", mappingDir)).toBe("steward-minted-name");
+  });
+
+  test("resume/compact with an existing mapping reuses it — no re-mint", () => {
+    writeMapping("sess-1", "existing-nanoid-name", mappingDir);
+
+    const name = resolveSessionNanoid({ sessionId: "sess-1", mappingDir });
+
+    expect(name).toBe("existing-nanoid-name");
+  });
+
+  test("uninjected startup mints a nanoid and persists it", () => {
+    const name = resolveSessionNanoid({ sessionId: "sess-2", mappingDir });
+
+    expect(name).toMatch(/^[a-z0-9_-]{21}$/);
+    expect(readMapping("sess-2", mappingDir)).toBe(name);
   });
 });

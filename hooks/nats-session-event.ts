@@ -27,7 +27,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { readMapping } from "../src/identity";
+import { DEFAULT_NAME_MAPPING_DIR, readMapping } from "../src/identity";
 
 const NATS_BIN =
   ["/opt/homebrew/bin/nats", "/usr/local/bin/nats", "/usr/bin/nats"].find(existsSync) ?? "nats";
@@ -114,10 +114,17 @@ const subject = `agent.session.${RUNTIME}.${event}.${project}`;
 const sessionId: string | undefined = payload.session_id ?? process.env.CLAUDE_CODE_SESSION_ID;
 const contextId = sessionId ? readMapping(sessionId) : undefined;
 const taskId = process.env.BOBMS_A2A_TASK_ID;
+// Wire name precedence mirrors the server's: steward-injected NATS_SESSION_NAME
+// outranks the persisted per-session nanoid; the cwd-derived <project> token
+// above stays a routing convention, never the identity.
+const sessionName =
+  process.env.NATS_SESSION_NAME ??
+  (sessionId ? readMapping(sessionId, DEFAULT_NAME_MAPPING_DIR) : undefined);
 
 const body: Record<string, any> = { ...payload };
 if (contextId) body.context_id = contextId;
 if (taskId) body.task_id = taskId;
+if (sessionName) body.session_name = sessionName;
 const outRaw = JSON.stringify(body);
 
 if (echo) {
