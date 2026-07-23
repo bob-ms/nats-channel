@@ -240,11 +240,12 @@ describe.skipIf(!hasServer)('peers — integration', () => {
   // plain subscription on its derived spawn subject standing in for the host
   // controllers' spawn endpoint (request/reply, service-error headers).
 
+  // BOB-476 grammar: the spawn command rides the control plane —
+  // `agents.control.spawn.<rt>.<owner>.<steward>`.
   function spawnSubjectOf(ref: ReferenceAgent): string {
-    return ref.promptSubject
-      .split('.')
-      .map((t, i) => (i === 1 ? 'spawn' : t))
-      .join('.')
+    const tokens = ref.promptSubject.split('.')
+    tokens.splice(1, 1, 'control', 'spawn')
+    return tokens.join('.')
   }
 
   test('spawnAgent frames the request, mints a nanoid spawn token, and stamps the sender', async () => {
@@ -256,6 +257,7 @@ describe.skipIf(!hasServer)('peers — integration', () => {
       extraMetadata: { role: 'controller' },
       heartbeatIntervalS: 1,
     })
+    expect(spawnSubjectOf(ref)).toBe('agents.control.spawn.cc.rob.control-spawn')
     const captured: { payload?: Record<string, unknown> } = {}
     const sub = nc.subscribe(spawnSubjectOf(ref), {
       callback: (_err, msg) => {
@@ -402,22 +404,24 @@ describe.skipIf(!hasServer)('peers — integration', () => {
   })
 
   // ── BOB-475: the JetStream PubAck racing the steward reply ────────────────
-  // On the live plane the AGENTS_EVENTS stream (BOB-472 spawn records)
-  // captures `agents.spawn.>`, so the server's PubAck lands on the request
-  // inbox ahead of the steward's reply — 0.3.0's single-message request took
-  // the ack as the reply and every outcome surfaced as "no session_id". These
-  // tests stand up a REAL stream over the spawn subject via $JS.API (deleted
-  // after), so the ack is server-generated, not hand-rolled; the steward
-  // replies use the host pi controller's actual envelopes (controller.ts:
-  // success = SpawnDescriptor + spawn_token JSON body, error = respondError's
-  // Nats-Service-Error/-Code headers with an empty body).
+  // Under the pre-BOB-476 grammar AGENTS_EVENTS captured `agents.spawn.>`, so
+  // the server's PubAck landed on the request inbox ahead of the steward's
+  // reply — 0.3.0's single-message request took the ack as the reply and every
+  // outcome surfaced as "no session_id". The BOB-476 grammar removes the
+  // overlap (AGENTS_EVENTS ← `agents.lifecycle.>` only), but the PubAck skip
+  // stays as defence in depth; these tests stand up a REAL stream over the new
+  // control-plane spawn subject via $JS.API (deleted after) to simulate an
+  // overlapping stream, so the ack is server-generated, not hand-rolled. The
+  // steward replies use the host pi controller's actual envelopes
+  // (controller.ts: success = SpawnDescriptor + spawn_token JSON body, error =
+  // respondError's Nats-Service-Error/-Code headers with an empty body).
 
-  async function withAgentsEventsStream(fn: () => Promise<void>): Promise<void> {
+  async function withOverlappingStream(fn: () => Promise<void>): Promise<void> {
     const create = await nc.request(
       '$JS.API.STREAM.CREATE.AGENTS_EVENTS',
       JSON.stringify({
         name: 'AGENTS_EVENTS',
-        subjects: ['agents.spawn.>'],
+        subjects: ['agents.lifecycle.>', 'agents.control.spawn.>'],
         storage: 'memory',
         retention: 'limits',
       }),
@@ -466,7 +470,7 @@ describe.skipIf(!hasServer)('peers — integration', () => {
       },
     })
     try {
-      await withAgentsEventsStream(async () => {
+      await withOverlappingStream(async () => {
         const res = await spawnAgent(
           nc,
           { steward: 'control-red' },
@@ -504,7 +508,7 @@ describe.skipIf(!hasServer)('peers — integration', () => {
       },
     })
     try {
-      await withAgentsEventsStream(async () => {
+      await withOverlappingStream(async () => {
         await expect(
           spawnAgent(nc, { steward: 'control-red' }, { repo: 'hub', prompt: 'go' }, SENDER, {
             timeoutMs: 5000,

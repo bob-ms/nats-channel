@@ -39,6 +39,9 @@ function isTerminator(bytes: Uint8Array): boolean {
  * as captured live, BOB-475): what the server sends to the request inbox when a
  * JetStream stream's subject space overlaps the requested subject. Never a
  * steward reply — those carry `session_id` (success) or service-error headers.
+ * Since BOB-476 the spawn request lives on the `control` plane
+ * (`agents.control.spawn.>`), which no stream captures — this skip stays as
+ * defence in depth against a future overlapping stream.
  */
 function isJetStreamPubAck(parsed: unknown): boolean {
   if (typeof parsed !== 'object' || parsed === null) return false
@@ -244,13 +247,14 @@ export async function spawnAgent(
     }
 
     const { agent, row } = stewards[0]!
-    // The spawn endpoint lives beside the prompt endpoint on the same
-    // verb-first tree: swap the verb token.
+    // The spawn command lives on the control plane (BOB-476 grammar:
+    // `agents.<plane>.<operation>.<runtime>.<owner>.<address>`): derive
+    // `agents.control.spawn.<rt>.<owner>.<steward>` from the prompt endpoint.
     const tokens = agent.promptEndpoint.subject.split('.')
     if (tokens[1] !== 'prompt') {
       throw new Error(`steward ${row.name} has an unexpected endpoint subject: ${agent.promptEndpoint.subject}`)
     }
-    tokens[1] = 'spawn'
+    tokens.splice(1, 1, 'control', 'spawn')
     const spawnSubject = tokens.join('.')
 
     const spawnToken = opts?.spawnToken ?? mintSessionName()
@@ -266,11 +270,11 @@ export async function spawnAgent(
       sender,
     })
 
-    // The spawn subject is also captured by the AGENTS_EVENTS JetStream stream
-    // (the BOB-472 spawn-record tree overlaps `agents.spawn.>`), so the request
-    // inbox receives the stream's PubAck alongside — and usually before — the
-    // steward's reply (BOB-475). Collect replies and let the first non-PubAck
-    // message decide the outcome.
+    // The control-plane subject is not captured by any stream (AGENTS_EVENTS
+    // owns `agents.lifecycle.>` only since BOB-476), but a misconfigured or
+    // legacy stream overlapping it would land its PubAck on the request inbox
+    // ahead of the steward's reply (as `agents.spawn.>` did — BOB-475). Keep
+    // collecting replies and let the first non-PubAck message decide.
     let reply: SpawnAgentReply | undefined
     let stewardError: Error | undefined
     try {
